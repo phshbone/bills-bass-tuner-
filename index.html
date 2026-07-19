@@ -72,17 +72,210 @@ const configs={
  bass:[['E',41.20,12,2],['A',55.00,10,19],['D',73.42,8,37],['G',98.00,6,55]],
  guitar:[['E',82.41,10,0],['A',110.00,9,11],['D',146.83,8,22],['G',196.00,6,34],['B',246.94,4,46],['E',329.63,3,57]]
 };
-let mode='bass',selected=0,micOn=false,demoTimer=null,audioCtx=null,analyser=null,source=null,data=null;
+const NOTE_NAMES=['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+const MANUAL_RANGE_CENTS=200; // two semitones below or above the selected string
+let mode='bass',selected=0,micOn=false,demoTimer=null,audioCtx=null,analyser=null,source=null,stream=null,data=null;
+let smoothFrequency=0,lastGoodPitchAt=0;
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const strings=$('#strings'),note=$('#note'),cents=$('#cents'),direction=$('#direction'),phase=$('#phase'),micBtn=$('#micBtn'),demoBtn=$('#demoBtn'),autoBtn=$('#autoBtn');
-function renderStrings(){strings.innerHTML='';configs[mode].forEach((s,i)=>{const row=document.createElement('div');row.className='string-row'+(i===selected?' active':'');row.style.setProperty('--thickness',s[2]+'px');row.style.setProperty('--offset',s[3]+'%');row.innerHTML=`<div class="string"></div><button class="string-btn" aria-label="Select ${s[0]} string">${s[0]}</button>`;row.onclick=()=>selectString(i,true);strings.appendChild(row)});$('#selectorTitle').textContent=mode==='bass'?'Bass Strings':'Guitar Strings';updateReadout(0,false)}
-function selectString(i,pluck){selected=i;$$('.string-row').forEach((r,n)=>r.classList.toggle('active',n===i));const row=$$('.string-row')[i];if(pluck){row.classList.remove('plucked');void row.offsetWidth;row.classList.add('plucked')}updateReadout(0,false)}
-function updateReadout(value,listening=true){const s=configs[mode][selected];note.textContent=s[0];if(!listening){cents.textContent=s[1].toFixed(2)+' Hz';direction.textContent='selected string';phase.textContent='PLAY THE '+s[0]+' STRING';document.documentElement.style.setProperty('--signal','var(--green)');return}const rounded=Math.round(value);cents.textContent=(rounded>0?'+':'')+rounded+' cents';direction.textContent=Math.abs(rounded)<=3?'in tune':rounded<0?'flat — tune up':'sharp — tune down';phase.textContent=Math.abs(rounded)<=3?'LOCKED IN TUNE':'LISTENING';document.documentElement.style.setProperty('--signal',Math.abs(rounded)<=3?'#8fb394':Math.abs(rounded)<=14?'#c49a5b':'#a85f62')}
-function demo(){clearInterval(demoTimer);demoBtn.classList.add('active');let t=0;demoTimer=setInterval(()=>{t++;const value=Math.round(Math.sin(t/3)*28*(1-Math.min(t,55)/65));updateReadout(value,true);const row=$$('.string-row')[selected];row.classList.add('listening');if(t>65){clearInterval(demoTimer);row.classList.remove('listening');demoBtn.classList.remove('active');updateReadout(0,true)}},90)}
-async function toggleMic(){if(micOn){micOn=false;micBtn.textContent='Activate Mic';micBtn.classList.remove('active');source?.disconnect();audioCtx?.close();audioCtx=null;$$('.string-row').forEach(r=>r.classList.remove('listening'));phase.textContent='MICROPHONE OFF';return}try{const stream=await navigator.mediaDevices.getUserMedia({audio:true});audioCtx=new (window.AudioContext||window.webkitAudioContext)();analyser=audioCtx.createAnalyser();analyser.fftSize=1024;source=audioCtx.createMediaStreamSource(stream);source.connect(analyser);data=new Uint8Array(analyser.fftSize);micOn=true;micBtn.textContent='Mic Active';micBtn.classList.add('active');phase.textContent='LISTENING';listenLevel()}catch(e){phase.textContent='MICROPHONE NOT AVAILABLE';direction.textContent='permission required'}}
-function listenLevel(){if(!micOn)return;analyser.getByteTimeDomainData(data);let sum=0;for(const v of data){const x=(v-128)/128;sum+=x*x}const rms=Math.sqrt(sum/data.length);const row=$$('.string-row')[selected];row.classList.toggle('listening',rms>.035);cents.textContent=rms>.035?'signal detected':'listening…';direction.textContent='pitch engine comes next';requestAnimationFrame(listenLevel)}
-$$('.mode-tab').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;selected=0;$$('.mode-tab').forEach(x=>x.classList.toggle('active',x===b));renderStrings()});
-micBtn.onclick=toggleMic;demoBtn.onclick=demo;autoBtn.onclick=()=>{autoBtn.classList.toggle('active');autoBtn.textContent=autoBtn.classList.contains('active')?'Auto On':'Auto';};
+
+function renderStrings(){
+  strings.innerHTML='';
+  configs[mode].forEach((s,i)=>{
+    const row=document.createElement('div');
+    row.className='string-row'+(i===selected?' active':'');
+    row.style.setProperty('--thickness',s[2]+'px');
+    row.style.setProperty('--offset',s[3]+'%');
+    row.innerHTML=`<div class="string"></div><button class="string-btn" aria-label="Select ${s[0]} string">${s[0]}</button>`;
+    row.onclick=()=>selectString(i,true);
+    strings.appendChild(row);
+  });
+  $('#selectorTitle').textContent=mode==='bass'?'Bass Strings':'Guitar Strings';
+  showSelected();
+}
+
+function selectString(i,pluck){
+  selected=i;
+  smoothFrequency=0;
+  $$('.string-row').forEach((r,n)=>r.classList.toggle('active',n===i));
+  const row=$$('.string-row')[i];
+  if(pluck){row.classList.remove('plucked');void row.offsetWidth;row.classList.add('plucked')}
+  showSelected();
+}
+
+function showSelected(){
+  const target=configs[mode][selected];
+  note.textContent=target[0];
+  cents.textContent=target[1].toFixed(2)+' Hz';
+  direction.textContent=micOn?'listening…':'selected string';
+  phase.textContent='PLAY THE '+target[0]+' STRING';
+  document.documentElement.style.setProperty('--signal','var(--green)');
+}
+
+function frequencyToNote(freq){
+  const midi=Math.round(69+12*Math.log2(freq/440));
+  return {midi,name:NOTE_NAMES[(midi%12+12)%12],octave:Math.floor(midi/12)-1};
+}
+
+function updatePitch(freq,rms){
+  const target=configs[mode][selected];
+  const targetHz=target[1];
+  const diffCents=1200*Math.log2(freq/targetHz);
+  const rounded=Math.round(diffCents);
+  const detected=frequencyToNote(freq);
+  const inManualRange=Math.abs(diffCents)<=MANUAL_RANGE_CENTS;
+  const row=$$('.string-row')[selected];
+  row.classList.toggle('listening',rms>.025 && inManualRange);
+
+  note.textContent=detected.name;
+  cents.textContent=(rounded>0?'+':'')+rounded+' cents';
+  phase.textContent='TARGET '+target[0]+'  •  HEARD '+detected.name+detected.octave;
+
+  if(!inManualRange){
+    direction.textContent=rounded<0?'too low — tighten toward '+target[0]:'too high — loosen toward '+target[0];
+    document.documentElement.style.setProperty('--signal','#a85f62');
+    return;
+  }
+
+  if(Math.abs(rounded)<=4){
+    direction.textContent='in tune';
+    phase.textContent='LOCKED IN TUNE';
+    document.documentElement.style.setProperty('--signal','#8fb394');
+  }else if(rounded<0){
+    direction.textContent='flat — tighten string';
+    document.documentElement.style.setProperty('--signal',Math.abs(rounded)<=18?'#c49a5b':'#a85f62');
+  }else{
+    direction.textContent='sharp — loosen string';
+    document.documentElement.style.setProperty('--signal',Math.abs(rounded)<=18?'#c49a5b':'#a85f62');
+  }
+}
+
+function demo(){
+  clearInterval(demoTimer);
+  demoBtn.classList.add('active');
+  let t=0;
+  const target=configs[mode][selected][1];
+  demoTimer=setInterval(()=>{
+    t++;
+    const fakeCents=Math.round(Math.sin(t/3)*170*(1-Math.min(t,58)/70));
+    const fakeFreq=target*Math.pow(2,fakeCents/1200);
+    updatePitch(fakeFreq,.08);
+    if(t>70){
+      clearInterval(demoTimer);
+      $$('.string-row')[selected].classList.remove('listening');
+      demoBtn.classList.remove('active');
+      updatePitch(target,.08);
+    }
+  },90);
+}
+
+function autoCorrelate(buffer,sampleRate,targetHz){
+  let rms=0;
+  for(let i=0;i<buffer.length;i++)rms+=buffer[i]*buffer[i];
+  rms=Math.sqrt(rms/buffer.length);
+  if(rms<.012)return {frequency:-1,rms};
+
+  const minHz=targetHz*Math.pow(2,-MANUAL_RANGE_CENTS/1200);
+  const maxHz=targetHz*Math.pow(2, MANUAL_RANGE_CENTS/1200);
+  const minLag=Math.max(2,Math.floor(sampleRate/maxHz));
+  const maxLag=Math.min(buffer.length-2,Math.ceil(sampleRate/minHz));
+  let bestLag=-1,bestCorrelation=0;
+
+  for(let lag=minLag;lag<=maxLag;lag++){
+    let correlation=0,normA=0,normB=0;
+    const limit=buffer.length-lag;
+    for(let i=0;i<limit;i++){
+      const a=buffer[i],b=buffer[i+lag];
+      correlation+=a*b;normA+=a*a;normB+=b*b;
+    }
+    correlation/=Math.sqrt(normA*normB)||1;
+    if(correlation>bestCorrelation){bestCorrelation=correlation;bestLag=lag;}
+  }
+  if(bestLag<0||bestCorrelation<.72)return {frequency:-1,rms};
+
+  // Parabolic interpolation around the best lag improves cents accuracy.
+  const corrAt=lag=>{
+    let c=0,a2=0,b2=0,limit=buffer.length-lag;
+    for(let i=0;i<limit;i++){const a=buffer[i],b=buffer[i+lag];c+=a*b;a2+=a*a;b2+=b*b;}
+    return c/(Math.sqrt(a2*b2)||1);
+  };
+  const left=bestLag>minLag?corrAt(bestLag-1):bestCorrelation;
+  const right=bestLag<maxLag?corrAt(bestLag+1):bestCorrelation;
+  const denom=left-2*bestCorrelation+right;
+  const shift=Math.abs(denom)>.0001?.5*(left-right)/denom:0;
+  return {frequency:sampleRate/(bestLag+Math.max(-.5,Math.min(.5,shift))),rms};
+}
+
+async function toggleMic(){
+  if(micOn){
+    micOn=false;
+    micBtn.textContent='Activate Mic';
+    micBtn.classList.remove('active');
+    try{source?.disconnect()}catch(e){}
+    stream?.getTracks().forEach(t=>t.stop());
+    try{await audioCtx?.close()}catch(e){}
+    audioCtx=analyser=source=stream=data=null;
+    $$('.string-row').forEach(r=>r.classList.remove('listening'));
+    phase.textContent='MICROPHONE OFF';
+    direction.textContent='tap Activate Mic to continue';
+    return;
+  }
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    analyser=audioCtx.createAnalyser();
+    analyser.fftSize=8192;
+    analyser.smoothingTimeConstant=.15;
+    source=audioCtx.createMediaStreamSource(stream);
+    source.connect(analyser);
+    data=new Float32Array(analyser.fftSize);
+    micOn=true;
+    micBtn.textContent='Mic Active';
+    micBtn.classList.add('active');
+    phase.textContent='PLAY THE '+configs[mode][selected][0]+' STRING';
+    direction.textContent='listening…';
+    listenPitch();
+  }catch(e){
+    phase.textContent='MICROPHONE NOT AVAILABLE';
+    direction.textContent='permission required';
+  }
+}
+
+function listenPitch(){
+  if(!micOn||!analyser||!audioCtx)return;
+  analyser.getFloatTimeDomainData(data);
+  const targetHz=configs[mode][selected][1];
+  const result=autoCorrelate(data,audioCtx.sampleRate,targetHz);
+  const row=$$('.string-row')[selected];
+
+  if(result.frequency>0){
+    smoothFrequency=smoothFrequency?smoothFrequency*.72+result.frequency*.28:result.frequency;
+    lastGoodPitchAt=performance.now();
+    updatePitch(smoothFrequency,result.rms);
+  }else if(performance.now()-lastGoodPitchAt>350){
+    row.classList.remove('listening');
+    note.textContent=configs[mode][selected][0];
+    cents.textContent='listening…';
+    direction.textContent=result.rms>.012?'sound heard — finding note':'play the selected string';
+    phase.textContent='TARGET '+configs[mode][selected][0];
+    document.documentElement.style.setProperty('--signal','var(--green)');
+  }
+  requestAnimationFrame(listenPitch);
+}
+
+$$('.mode-tab').forEach(b=>b.onclick=()=>{
+  mode=b.dataset.mode;selected=0;smoothFrequency=0;
+  $$('.mode-tab').forEach(x=>x.classList.toggle('active',x===b));
+  renderStrings();
+});
+micBtn.onclick=toggleMic;
+demoBtn.onclick=demo;
+autoBtn.onclick=()=>{
+  autoBtn.classList.toggle('active');
+  autoBtn.textContent=autoBtn.classList.contains('active')?'Manual Wide':'Manual';
+  direction.textContent='manual range: two semitones each side';
+};
+autoBtn.textContent='Manual';
 renderStrings();
 })();
 </script>
