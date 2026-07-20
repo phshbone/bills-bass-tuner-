@@ -31,7 +31,7 @@ button{font:inherit;touch-action:manipulation}
 .dial{--size:min(66vw,300px);width:var(--size);aspect-ratio:1;margin:8px auto 3px;border-radius:50%;padding:11px;background:conic-gradient(from 210deg,#303842,rgba(127,153,130,.75),#303842);box-shadow:0 0 0 2px rgba(199,206,211,.22),0 5px 0 rgba(70,78,74,.72),inset 0 0 18px #000;position:relative}
 .dial-inner{width:100%;height:100%;border-radius:50%;display:grid;place-items:center;position:relative;overflow:hidden;background:radial-gradient(circle at 50% 35%,#242b33,#0b0e12 72%);border:2px solid #0a0c0f;box-shadow:inset 0 0 42px #000,0 0 0 2px #515b66}
 .tune-shade{position:absolute;inset:0;border-radius:50%;z-index:0;opacity:0;background:radial-gradient(circle at 50% 44%,rgba(184,199,186,.58),rgba(127,153,130,.32) 46%,rgba(86,112,90,.2) 72%,transparent);transition:opacity .24s ease;pointer-events:none}
-.dial-inner.wave-locked .tune-shade{opacity:1;animation:lockGlow 1.15s ease-in-out infinite}
+.dial-inner.wave-locked .tune-shade{opacity:1;animation:lockGlow .7s ease-out 1}
 .tuning-waves{position:absolute;z-index:1;inset:4%;width:92%;height:92%;overflow:visible;filter:drop-shadow(0 0 4px var(--wave-color,#a85f62));pointer-events:none}
 .tuning-wave{fill:none;stroke:var(--wave-color,#a85f62);stroke-width:2.15;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;opacity:.92;transition:stroke .22s ease,opacity .2s ease}
 .tuning-wave.echo{stroke-width:5;opacity:.13;filter:blur(2px)}
@@ -56,7 +56,7 @@ button{font:inherit;touch-action:manipulation}
 @keyframes quiver{0%,100%{transform:translateY(-50%)}20%{transform:translateY(calc(-50% - 3px))}40%{transform:translateY(calc(-50% + 3px))}60%{transform:translateY(calc(-50% - 2px))}80%{transform:translateY(calc(-50% + 2px))}}
 @keyframes liveQuiver{0%,100%{transform:translateY(-50%) scaleY(1)}50%{transform:translateY(calc(-50% + 1.5px)) scaleY(.88)}}
 @keyframes breathe{50%{opacity:.38;transform:scale(.94)}}
-@keyframes lockGlow{50%{opacity:.74}}
+@keyframes lockGlow{0%{opacity:.35}45%{opacity:1}72%{opacity:.72}100%{opacity:1}}
 @media(max-width:430px){.stage{padding:12px}.dial{--size:min(61vw,265px)}.strings{gap:7px}.string-row{height:38px}.string-btn{width:43px;height:43px;font-size:21px}}
 /* Six guitar strings use a height-aware compact layout so the tuner, selector,
    and microphone controls remain together on one phone screen. Bass is unchanged. */
@@ -125,7 +125,7 @@ const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const strings=$('#strings'),note=$('#note'),cents=$('#cents'),direction=$('#direction'),phase=$('#phase'),micBtn=$('#micBtn'),demoBtn=$('#demoBtn'),autoBtn=$('#autoBtn');
 const dialInner=$('#dialInner'),leftWave=$('#leftWave'),rightWave=$('#rightWave'),leftWaveEcho=$('#leftWaveEcho'),rightWaveEcho=$('#rightWaveEcho');
 let waveTarget={cents:MANUAL_RANGE_CENTS,active:false,locked:false,level:0};
-let waveMotion={gap:31,amplitude:4.5,phase:0};
+let waveMotion={gap:31,amplitude:0,phase:0,activity:0,lastTime:0};
 
 function profile(){return PROFILES[mode]}
 function resetEngine(){
@@ -147,12 +147,16 @@ function setWaveTarget(centsValue,active=false,locked=false,rms=0){
   dialInner.classList.toggle('wave-locked',locked);
 }
 function drawTuningWaves(time){
+  const elapsed=waveMotion.lastTime?Math.min(40,time-waveMotion.lastTime):16;
+  waveMotion.lastTime=time;
   const closeness=1-waveTarget.cents/MANUAL_RANGE_CENTS;
   const desiredGap=waveTarget.locked?0:4+27*(1-closeness);
-  const desiredAmplitude=waveTarget.active?2.4+waveTarget.level*3.2+(1-closeness)*1.3:3.2;
+  const desiredActivity=waveTarget.active&&!waveTarget.locked?1:0;
+  const desiredAmplitude=desiredActivity?2.4+waveTarget.level*3.2+(1-closeness)*1.3:0;
   waveMotion.gap+=(desiredGap-waveMotion.gap)*.1;
-  waveMotion.amplitude+=(desiredAmplitude-waveMotion.amplitude)*.13;
-  waveMotion.phase=time*.016;
+  waveMotion.activity+=(desiredActivity-waveMotion.activity)*.12;
+  waveMotion.amplitude+=(desiredAmplitude-waveMotion.amplitude)*.16;
+  waveMotion.phase+=elapsed*.016*waveMotion.activity;
   const left=[],right=[];
   for(let y=6;y<=94;y+=2){
     const envelope=.58+.42*Math.sin(Math.PI*(y-6)/88);
